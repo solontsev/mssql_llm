@@ -20,7 +20,7 @@ public class SqlServerLlmClr
         string databaseSchema = GetDbSchema(databaseName);
         SendLargeMessage(databaseSchema);
         SqlContext.Pipe.Send(Environment.NewLine);
-        string query = GetSqlFromLlm(prompt, model, databaseName).Result;
+        string query = GetSqlFromLlm(prompt, model, databaseSchema).Result;
 
         string result = "use [" + databaseName + "]; " + query.Replace("\\n", " ");
         SqlContext.Pipe.Send(result + Environment.NewLine);
@@ -32,12 +32,13 @@ public class SqlServerLlmClr
     private static async Task<string> GetSqlFromLlm(string prompt, string model, string databaseSchema)
     {
         string url = "http://localhost:11434/api/generate";
-        string systemMessage = "You're a T-SQL expert working inside a SQL Server database with the following schema: " + databaseSchema + ". Please write a T-SQL query based on request, respond with the T-SQL query only as a simple string without additional text, formatting, and any special characters like tabs or end of line. Do not add anything before specified tables names. Use only names that are as provided.";
-        string json = "{\"prompt\":\"" + prompt.Replace("\"", "\\\"") + "\",\"system\":\"" + systemMessage + "\",\"model\":\"" + model + "\", \"stream\":false}";
+        string systemMessage = "You are an AI assistant specialized in writing T-SQL queries. Given the following database schema, generate only the valid T-SQL query based on the user's request. Do not include any comments, explanations, or additional formatting. Return only the T-SQL query as the response. Schema: " + databaseSchema + ". Only return a T-SQL query based on the schema above. No additional text is needed. Inside your response reference tables as [schema name].[table name] as provided in schema defenition.";
+        string json = "{\"prompt\":\"" + prompt.Replace("\"", "\\\"") + "\",\"system\":\"" + systemMessage + "\",\"model\":\"" + model + "\", \"options\": { \"temperature\": 0 }, \"stream\":false}";
 
         HttpWebRequest request = (HttpWebRequest)WebRequest.Create(url);
         request.ContentType = "application/json; charset=utf-8";
         request.Method = "POST";
+        request.Timeout = 300000;
 
         using (var streamWriter = new StreamWriter(request.GetRequestStream()))
         {
@@ -66,7 +67,7 @@ public class SqlServerLlmClr
     {
         string connectionString = "context connection=true"; // Use context connection for SQL CLR
         string result = string.Empty;
-        string query = "use [" + databaseName + "];\r\n-- Temporary table to hold the concatenated column definitions\r\nDECLARE @ColumnDefinitions TABLE (TableName NVARCHAR(128), ColumnDefinition NVARCHAR(MAX));\r\n\r\n-- Populate the temporary table with column definitions for each table\r\nINSERT INTO @ColumnDefinitions (TableName, ColumnDefinition)\r\nSELECT\r\n    t.TABLE_SCHEMA + '].[' + t.TABLE_NAME,\r\n    '  [' + c.COLUMN_NAME + '] ' + c.DATA_TYPE +\r\n    CASE \r\n        WHEN c.DATA_TYPE IN ('char', 'varchar', 'nchar', 'nvarchar') \r\n             THEN '(' + CAST(c.CHARACTER_MAXIMUM_LENGTH AS NVARCHAR) + ')'\r\n        WHEN c.DATA_TYPE IN ('decimal', 'numeric') \r\n             THEN '(' + CAST(c.NUMERIC_PRECISION AS NVARCHAR) + ',' + CAST(c.NUMERIC_SCALE AS NVARCHAR) + ')'\r\n        ELSE ''\r\n    END +\r\n    CASE \r\n        WHEN c.IS_NULLABLE = 'NO' THEN ' NOT NULL'\r\n        ELSE ' NULL'\r\n    END + ', '\r\nFROM INFORMATION_SCHEMA.TABLES t\r\nINNER JOIN INFORMATION_SCHEMA.COLUMNS c\r\n    ON t.TABLE_NAME = c.TABLE_NAME AND t.TABLE_SCHEMA = c.TABLE_SCHEMA\r\nWHERE t.TABLE_TYPE = 'BASE TABLE';\r\n\r\n-- Construct CREATE TABLE statements using FOR XML PATH\r\nDECLARE @CreateTableStatements NVARCHAR(MAX) = '';\r\n\r\nSELECT @CreateTableStatements = STUFF((\r\n    SELECT CHAR(13) + CHAR(10) +\r\n           'CREATE TABLE [' + TableName + '] (' +\r\n           STUFF((\r\n               SELECT ColumnDefinition\r\n               FROM @ColumnDefinitions\r\n               WHERE TableName = t.TableName\r\n               ORDER BY ColumnDefinition\r\n               FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '') +\r\n           ')' AS CreateTableStatement\r\n    FROM (SELECT DISTINCT TableName FROM @ColumnDefinitions) t\r\n    FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');\r\n\r\nselect @CreateTableStatements as result;";
+        string query = "use [" + databaseName + "];\r\n-- Temporary table to hold the concatenated column definitions\r\nDECLARE @ColumnDefinitions TABLE (TableName NVARCHAR(128), ColumnDefinition NVARCHAR(MAX));\r\n\r\n-- Populate the temporary table with column definitions for each table\r\nINSERT INTO @ColumnDefinitions (TableName, ColumnDefinition)\r\nSELECT\r\n    t.TABLE_SCHEMA + '].[' + t.TABLE_NAME,\r\n    '  [' + c.COLUMN_NAME + '] ' + c.DATA_TYPE +\r\n    CASE \r\n        WHEN c.DATA_TYPE IN ('char', 'varchar', 'nchar', 'nvarchar') \r\n             THEN '(' + CAST(c.CHARACTER_MAXIMUM_LENGTH AS NVARCHAR) + ')'\r\n        WHEN c.DATA_TYPE IN ('decimal', 'numeric') \r\n             THEN '(' + CAST(c.NUMERIC_PRECISION AS NVARCHAR) + ',' + CAST(c.NUMERIC_SCALE AS NVARCHAR) + ')'\r\n        ELSE ''\r\n    END +\r\n    CASE \r\n        WHEN c.IS_NULLABLE = 'NO' THEN ' NOT NULL'\r\n        ELSE ' NULL'\r\n    END + ', '\r\nFROM INFORMATION_SCHEMA.TABLES t\r\nINNER JOIN INFORMATION_SCHEMA.COLUMNS c\r\n    ON t.TABLE_NAME = c.TABLE_NAME AND t.TABLE_SCHEMA = c.TABLE_SCHEMA\r\nWHERE t.TABLE_TYPE = 'BASE TABLE';\r\n\r\n-- Construct CREATE TABLE statements using FOR XML PATH\r\nDECLARE @CreateTableStatements NVARCHAR(MAX) = '';\r\n\r\nSELECT @CreateTableStatements = STUFF((\r\n    SELECT ' CREATE TABLE [' + TableName + '] (' +\r\n           STUFF((\r\n               SELECT ColumnDefinition\r\n               FROM @ColumnDefinitions\r\n               WHERE TableName = t.TableName\r\n               ORDER BY ColumnDefinition\r\n               FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '') +\r\n           ')' AS CreateTableStatement\r\n    FROM (SELECT DISTINCT TableName FROM @ColumnDefinitions) t\r\n    FOR XML PATH(''), TYPE).value('.', 'NVARCHAR(MAX)'), 1, 2, '');\r\n\r\nselect @CreateTableStatements as result;";
 
         using (SqlConnection connection = new SqlConnection(connectionString))
         {
